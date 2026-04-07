@@ -1,0 +1,508 @@
+asyncapi: 3.0.0
+info:
+  title: GoMQ Messaging Protocol
+  version: 1.0.0
+  description: |
+    Protocolo de mensageria do GoMQ baseado em WebSocket.
+
+    ## Modelo de Comunicação
+
+    Clientes (produtores e consumidores) conectam-se via WebSocket
+    ao endpoint `ws://host:port/ws` e trocam frames JSON.
+    Cada frame possui um campo `action` que determina o tipo de operação.
+
+    ## Fluxo de Vida de uma Mensagem
+
+    1. Produtor envia `publish` → Broker armazena na fila → Broker responde `publish_ack`
+    2. Consumidor envia `subscribe` → Broker registra interesse
+    3. Broker envia `deliver` ao consumidor quando há mensagem disponível
+    4. Consumidor envia `ack` (sucesso) ou `nack` (falha) referenciando o `delivery_id`
+    5. Se `nack` e retries esgotados → mensagem vai para DLQ (se habilitada)
+
+    ## Política de Entrega
+
+    - **At-least-once:** mensagens são re-entregues se não receberem Ack
+      dentro do timeout configurado (padrão: 30s).
+    - **Round-robin:** quando múltiplos consumidores estão na mesma fila,
+      mensagens são distribuídas em round-robin.
+
+  contact:
+    name: GoMQ Team
+
+defaultContentType: application/json
+
+servers:
+  development:
+    host: localhost:8081
+    protocol: ws
+    description: Servidor WebSocket de desenvolvimento
+
+channels:
+  broker:
+    address: /ws
+    description: |
+      Canal WebSocket único por onde todas as operações de mensageria
+      trafegam. A diferenciação é feita pelo campo `action` no payload JSON.
+    messages:
+      # --- Mensagens enviadas pelo CLIENTE ao BROKER ---
+      publishCommand:
+        $ref: "#/components/messages/PublishCommand"
+      subscribeCommand:
+        $ref: "#/components/messages/SubscribeCommand"
+      unsubscribeCommand:
+        $ref: "#/components/messages/UnsubscribeCommand"
+      ackCommand:
+        $ref: "#/components/messages/AckCommand"
+      nackCommand:
+        $ref: "#/components/messages/NackCommand"
+
+      # --- Mensagens enviadas pelo BROKER ao CLIENTE ---
+      publishAckResponse:
+        $ref: "#/components/messages/PublishAckResponse"
+      subscribeAckResponse:
+        $ref: "#/components/messages/SubscribeAckResponse"
+      deliverEvent:
+        $ref: "#/components/messages/DeliverEvent"
+      errorResponse:
+        $ref: "#/components/messages/ErrorResponse"
+
+operations:
+  publish:
+    action: send
+    channel:
+      $ref: "#/channels/broker"
+    summary: Publicar mensagem em uma fila
+    description: |
+      O produtor envia uma mensagem para uma fila específica.
+      O broker armazena a mensagem e retorna um `publish_ack` com o ID
+      da mensagem gerado, ou um `error` caso a fila não exista,
+      esteja cheia, ou o payload seja inválido.
+    messages:
+      - $ref: "#/channels/broker/messages/publishCommand"
+    reply:
+      channel:
+        $ref: "#/channels/broker"
+      messages:
+        - $ref: "#/channels/broker/messages/publishAckResponse"
+
+  subscribe:
+    action: send
+    channel:
+      $ref: "#/channels/broker"
+    summary: Inscrever-se para receber mensagens de uma fila
+    description: |
+      O consumidor se registra para receber mensagens de uma fila.
+      O broker confirma a inscrição com `subscribe_ack`.
+      A partir deste momento, o broker enviará `deliver` frames
+      conforme mensagens estejam disponíveis.
+    messages:
+      - $ref: "#/channels/broker/messages/subscribeCommand"
+    reply:
+      channel:
+        $ref: "#/channels/broker"
+      messages:
+        - $ref: "#/channels/broker/messages/subscribeAckResponse"
+
+  acknowledge:
+    action: send
+    channel:
+      $ref: "#/channels/broker"
+    summary: Confirmar processamento de uma mensagem (Ack)
+    description: |
+      O consumidor confirma que processou a mensagem com sucesso.
+      O broker remove a mensagem da fila permanentemente.
+    messages:
+      - $ref: "#/channels/broker/messages/ackCommand"
+
+  negativeAcknowledge:
+    action: send
+    channel:
+      $ref: "#/channels/broker"
+    summary: Rejeitar processamento de uma mensagem (Nack)
+    description: |
+      O consumidor indica que falhou ao processar a mensagem.
+      O broker incrementa o contador de retries da mensagem:
+      - Se retries < max_retries: recoloca na fila para re-entrega
+      - Se retries >= max_retries e DLQ habilitada: move para DLQ
+      - Se retries >= max_retries e DLQ desabilitada: descarta a mensagem
+    messages:
+      - $ref: "#/channels/broker/messages/nackCommand"
+
+  deliver:
+    action: receive
+    channel:
+      $ref: "#/channels/broker"
+    summary: Broker entrega mensagem ao consumidor
+    description: |
+      Frame enviado pelo broker para entregar uma mensagem ao consumidor.
+      O consumidor DEVE responder com `ack` ou `nack` referenciando o
+      `delivery_id`. Se nenhuma resposta for recebida dentro do
+      `ack_timeout` (padrão 30s), o broker trata como Nack implícito.
+    messages:
+      - $ref: "#/channels/broker/messages/deliverEvent"
+
+components:
+  messages:
+    # ==========================================
+    # CLIENTE → BROKER
+    # ==========================================
+    PublishCommand:
+      name: publish
+      title: Comando de Publicação
+      summary: Publica uma mensagem em uma fila
+      contentType: application/json
+      payload:
+        $ref: "#/components/schemas/PublishPayload"
+
+    SubscribeCommand:
+      name: subscribe
+      title: Comando de Inscrição
+      summary: Registra o consumidor em uma fila
+      contentType: application/json
+      payload:
+        $ref: "#/components/schemas/SubscribePayload"
+
+    UnsubscribeCommand:
+      name: unsubscribe
+      title: Comando de Cancelamento de Inscrição
+      summary: Remove o consumidor de uma fila
+      contentType: application/json
+      payload:
+        $ref: "#/components/schemas/UnsubscribePayload"
+
+    AckCommand:
+      name: ack
+      title: Confirmação de Processamento
+      summary: Confirma que a mensagem foi processada com sucesso
+      contentType: application/json
+      payload:
+        $ref: "#/components/schemas/AckPayload"
+
+    NackCommand:
+      name: nack
+      title: Rejeição de Processamento
+      summary: Indica falha no processamento da mensagem
+      contentType: application/json
+      payload:
+        $ref: "#/components/schemas/NackPayload"
+
+    # ==========================================
+    # BROKER → CLIENTE
+    # ==========================================
+    PublishAckResponse:
+      name: publish_ack
+      title: Confirmação de Publicação
+      summary: Confirma que a mensagem foi aceita pelo broker
+      contentType: application/json
+      payload:
+        $ref: "#/components/schemas/PublishAckPayload"
+
+    SubscribeAckResponse:
+      name: subscribe_ack
+      title: Confirmação de Inscrição
+      summary: Confirma que o consumidor foi registrado
+      contentType: application/json
+      payload:
+        $ref: "#/components/schemas/SubscribeAckPayload"
+
+    DeliverEvent:
+      name: deliver
+      title: Entrega de Mensagem
+      summary: Entrega uma mensagem ao consumidor para processamento
+      contentType: application/json
+      payload:
+        $ref: "#/components/schemas/DeliverPayload"
+
+    ErrorResponse:
+      name: error
+      title: Resposta de Erro
+      summary: Indica um erro no processamento de um comando
+      contentType: application/json
+      payload:
+        $ref: "#/components/schemas/ErrorPayload"
+
+  schemas:
+    # ==========================================
+    # PAYLOADS DO CLIENTE
+    # ==========================================
+    PublishPayload:
+      type: object
+      required:
+        - action
+        - queue
+        - body
+      properties:
+        action:
+          type: string
+          const: publish
+          description: Identificador fixo da operação
+        request_id:
+          type: string
+          format: uuid
+          description: |
+            ID opcional de correlação gerado pelo cliente.
+            Se fornecido, será devolvido no `publish_ack` para
+            que o cliente correlacione requisição e resposta.
+          example: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        queue:
+          type: string
+          description: Nome da fila de destino
+          example: "orders.created"
+        body:
+          type: string
+          description: |
+            Corpo da mensagem como string. O broker é agnóstico
+            ao formato — pode ser JSON, texto plano, base64, etc.
+            O limite de tamanho é 1MB.
+          maxLength: 1048576
+          example: '{"orderId": 123, "total": 59.90}'
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+          description: |
+            Cabeçalhos opcionais key-value para metadados da mensagem.
+            Úteis para roteamento, rastreamento (trace-id), etc.
+          example:
+            content-type: "application/json"
+            trace-id: "xyz-789"
+        priority:
+          type: integer
+          minimum: 0
+          maximum: 9
+          default: 0
+          description: |
+            Prioridade da mensagem (0 = normal, 9 = mais alta).
+            Mensagens de maior prioridade são entregues primeiro.
+
+    SubscribePayload:
+      type: object
+      required:
+        - action
+        - queue
+      properties:
+        action:
+          type: string
+          const: subscribe
+        queue:
+          type: string
+          description: Nome da fila para consumir
+          example: "orders.created"
+        ack_timeout_seconds:
+          type: integer
+          minimum: 1
+          maximum: 3600
+          default: 30
+          description: |
+            Tempo máximo (em segundos) que o broker aguarda Ack/Nack
+            após entregar uma mensagem. Se expirar, o broker trata
+            como Nack implícito e re-entrega a mensagem.
+
+    UnsubscribePayload:
+      type: object
+      required:
+        - action
+        - queue
+      properties:
+        action:
+          type: string
+          const: unsubscribe
+        queue:
+          type: string
+          description: Nome da fila da qual se desinscrever
+          example: "orders.created"
+
+    AckPayload:
+      type: object
+      required:
+        - action
+        - delivery_id
+      properties:
+        action:
+          type: string
+          const: ack
+        delivery_id:
+          type: string
+          format: uuid
+          description: |
+            ID da entrega (recebido no frame `deliver`).
+            Identifica unicamente esta tentativa de entrega.
+          example: "d1e2f3a4-b5c6-7890-abcd-ef1234567890"
+
+    NackPayload:
+      type: object
+      required:
+        - action
+        - delivery_id
+      properties:
+        action:
+          type: string
+          const: nack
+        delivery_id:
+          type: string
+          format: uuid
+          description: ID da entrega a ser rejeitada
+          example: "d1e2f3a4-b5c6-7890-abcd-ef1234567890"
+        reason:
+          type: string
+          maxLength: 500
+          description: |
+            Motivo opcional da rejeição. Armazenado para
+            fins de debugging e observabilidade.
+          example: "Failed to process: database connection timeout"
+        requeue:
+          type: boolean
+          default: true
+          description: |
+            Se true (padrão), o broker recoloca a mensagem na fila
+            para re-entrega (respeitando max_retries).
+            Se false, a mensagem vai diretamente para DLQ
+            ou é descartada.
+
+    # ==========================================
+    # PAYLOADS DO BROKER
+    # ==========================================
+    PublishAckPayload:
+      type: object
+      required:
+        - action
+        - message_id
+        - queue
+      properties:
+        action:
+          type: string
+          const: publish_ack
+        request_id:
+          type: string
+          format: uuid
+          description: Echo do request_id enviado pelo cliente (se fornecido)
+          example: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        message_id:
+          type: string
+          format: uuid
+          description: ID único da mensagem gerado pelo broker
+          example: "m1n2o3p4-q5r6-7890-abcd-ef1234567890"
+        queue:
+          type: string
+          example: "orders.created"
+        timestamp:
+          type: string
+          format: date-time
+          description: Momento em que a mensagem foi aceita pelo broker
+
+    SubscribeAckPayload:
+      type: object
+      required:
+        - action
+        - queue
+        - consumer_id
+      properties:
+        action:
+          type: string
+          const: subscribe_ack
+        queue:
+          type: string
+          example: "orders.created"
+        consumer_id:
+          type: string
+          format: uuid
+          description: |
+            ID único atribuído ao consumidor pelo broker.
+            Usado internamente para round-robin e tracking.
+          example: "c1d2e3f4-a5b6-7890-abcd-ef1234567890"
+
+    DeliverPayload:
+      type: object
+      required:
+        - action
+        - delivery_id
+        - message_id
+        - queue
+        - body
+        - attempt
+      properties:
+        action:
+          type: string
+          const: deliver
+        delivery_id:
+          type: string
+          format: uuid
+          description: |
+            ID único desta tentativa de entrega. É diferente do
+            message_id — a mesma mensagem pode ter múltiplos
+            delivery_ids em caso de re-entrega.
+          example: "d1e2f3a4-b5c6-7890-abcd-ef1234567890"
+        message_id:
+          type: string
+          format: uuid
+          description: ID original da mensagem
+          example: "m1n2o3p4-q5r6-7890-abcd-ef1234567890"
+        queue:
+          type: string
+          example: "orders.created"
+        body:
+          type: string
+          description: Corpo da mensagem original
+          example: '{"orderId": 123, "total": 59.90}'
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+          description: Cabeçalhos originais da mensagem
+        priority:
+          type: integer
+          description: Prioridade original da mensagem
+        attempt:
+          type: integer
+          minimum: 1
+          description: |
+            Número da tentativa de entrega atual (começa em 1).
+            Útil para o consumidor decidir se deve tentar processar
+            ou rejeitar definitivamente.
+          example: 1
+        max_attempts:
+          type: integer
+          description: Número máximo de tentativas configurado na fila
+          example: 3
+        published_at:
+          type: string
+          format: date-time
+          description: Momento em que a mensagem foi originalmente publicada
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: |
+            Momento em que a mensagem expira (baseado no TTL da fila).
+            Null se a fila não tem TTL configurado.
+
+    ErrorPayload:
+      type: object
+      required:
+        - action
+        - code
+        - message
+      properties:
+        action:
+          type: string
+          const: error
+        request_id:
+          type: string
+          format: uuid
+          description: Echo do request_id original (se aplicável)
+        code:
+          type: string
+          enum:
+            - QUEUE_NOT_FOUND
+            - QUEUE_FULL
+            - INVALID_PAYLOAD
+            - NOT_SUBSCRIBED
+            - DELIVERY_NOT_FOUND
+            - MESSAGE_TOO_LARGE
+            - INTERNAL_ERROR
+          description: Código de erro legível por máquina
+          example: "QUEUE_NOT_FOUND"
+        message:
+          type: string
+          description: Descrição legível por humanos
+          example: "Queue 'orders.created' does not exist"

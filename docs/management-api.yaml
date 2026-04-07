@@ -1,0 +1,341 @@
+openapi: 3.0.3
+info:
+  title: GoMQ Management API
+  description: |
+    API REST para gerenciamento administrativo do message broker GoMQ.
+    Permite criar, listar e deletar filas, bem como consultar métricas
+    básicas de mensagens pendentes.
+  version: 1.0.0
+  contact:
+    name: GoMQ Team
+
+servers:
+  - url: http://localhost:8080/api/v1
+    description: Servidor local de desenvolvimento
+
+paths:
+  /queues:
+    post:
+      operationId: createQueue
+      summary: Criar uma nova fila
+      description: |
+        Cria uma fila com nome único e configurações opcionais de TTL
+        (tempo de vida das mensagens) e MaxSize (capacidade máxima).
+        Se uma fila com o mesmo nome já existir, retorna 409 Conflict.
+      tags:
+        - Queues
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateQueueRequest"
+            examples:
+              filaComTTL:
+                summary: Fila com TTL de 60s e limite de 1000 mensagens
+                value:
+                  name: "orders.created"
+                  config:
+                    ttl_seconds: 60
+                    max_size: 1000
+                    enable_dlq: true
+                    max_retries: 3
+              filaPadrao:
+                summary: Fila com configurações padrão
+                value:
+                  name: "notifications"
+      responses:
+        "201":
+          description: Fila criada com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueueDetails"
+        "400":
+          description: Requisição inválida (nome vazio, valores negativos, etc.)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Já existe uma fila com este nome
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+    get:
+      operationId: listQueues
+      summary: Listar todas as filas e suas métricas
+      description: |
+        Retorna uma lista de todas as filas registradas no broker,
+        incluindo métricas de mensagens pendentes, processadas,
+        e informações da DLQ associada.
+      tags:
+        - Queues
+      parameters:
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+          description: Número da página para paginação
+        - name: page_size
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+          description: Quantidade de itens por página
+      responses:
+        "200":
+          description: Lista de filas retornada com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListQueuesResponse"
+
+  /queues/{name}:
+    get:
+      operationId: getQueue
+      summary: Obter detalhes de uma fila específica
+      tags:
+        - Queues
+      parameters:
+        - $ref: "#/components/parameters/QueueName"
+      responses:
+        "200":
+          description: Detalhes da fila
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueueDetails"
+        "404":
+          description: Fila não encontrada
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+    delete:
+      operationId: deleteQueue
+      summary: Deletar uma fila
+      description: |
+        Remove uma fila e todas as suas mensagens pendentes.
+        Também remove a DLQ associada, se existir.
+        Se houver consumidores conectados, eles serão desconectados.
+      tags:
+        - Queues
+      parameters:
+        - $ref: "#/components/parameters/QueueName"
+      responses:
+        "204":
+          description: Fila deletada com sucesso (sem conteúdo no corpo)
+        "404":
+          description: Fila não encontrada
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+components:
+  parameters:
+    QueueName:
+      name: name
+      in: path
+      required: true
+      description: |
+        Nome único da fila. Aceita caracteres alfanuméricos,
+        pontos, hífens e underscores. Máximo de 255 caracteres.
+      schema:
+        type: string
+        pattern: "^[a-zA-Z0-9._-]{1,255}$"
+      examples:
+        exemplo1:
+          value: "orders.created"
+        exemplo2:
+          value: "notifications"
+
+  schemas:
+    CreateQueueRequest:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+          description: Nome único da fila
+          pattern: "^[a-zA-Z0-9._-]{1,255}$"
+          minLength: 1
+          maxLength: 255
+          example: "orders.created"
+        config:
+          $ref: "#/components/schemas/QueueConfig"
+
+    QueueConfig:
+      type: object
+      description: Configurações opcionais da fila. Valores zero/ausentes usam os padrões do broker.
+      properties:
+        ttl_seconds:
+          type: integer
+          format: int64
+          minimum: 0
+          default: 0
+          description: |
+            Tempo de vida (em segundos) de cada mensagem na fila.
+            0 significa sem expiração. Mensagens expiradas são
+            descartadas automaticamente.
+          example: 60
+        max_size:
+          type: integer
+          format: int64
+          minimum: 0
+          default: 0
+          description: |
+            Número máximo de mensagens que a fila pode armazenar.
+            0 significa sem limite (limitado apenas pela memória).
+            Quando o limite é atingido, novas publicações são rejeitadas
+            com erro QUEUE_FULL.
+          example: 1000
+        enable_dlq:
+          type: boolean
+          default: false
+          description: |
+            Habilita a Dead-Letter Queue (DLQ) para esta fila.
+            Mensagens que receberem Nack repetidas vezes (até max_retries)
+            são movidas automaticamente para a DLQ.
+          example: true
+        max_retries:
+          type: integer
+          format: int32
+          minimum: 1
+          default: 3
+          description: |
+            Número máximo de tentativas de entrega antes de mover
+            a mensagem para a DLQ. Só é relevante se enable_dlq for true.
+          example: 3
+
+    QueueDetails:
+      type: object
+      properties:
+        name:
+          type: string
+          example: "orders.created"
+        config:
+          $ref: "#/components/schemas/QueueConfig"
+        metrics:
+          $ref: "#/components/schemas/QueueMetrics"
+        dlq_name:
+          type: string
+          nullable: true
+          description: |
+            Nome da DLQ associada. Convenção: "{nome_da_fila}.dlq".
+            Null se DLQ não estiver habilitada.
+          example: "orders.created.dlq"
+        created_at:
+          type: string
+          format: date-time
+          example: "2025-01-15T10:30:00Z"
+
+    QueueMetrics:
+      type: object
+      description: Métricas em tempo real da fila
+      properties:
+        pending:
+          type: integer
+          format: int64
+          description: Mensagens aguardando processamento
+          example: 42
+        in_flight:
+          type: integer
+          format: int64
+          description: |
+            Mensagens entregues a consumidores mas ainda
+            não confirmadas (aguardando Ack/Nack)
+          example: 5
+        total_published:
+          type: integer
+          format: int64
+          description: Total de mensagens publicadas desde a criação da fila
+          example: 15230
+        total_acked:
+          type: integer
+          format: int64
+          description: Total de mensagens confirmadas (Ack) com sucesso
+          example: 15180
+        total_nacked:
+          type: integer
+          format: int64
+          description: Total de mensagens rejeitadas (Nack)
+          example: 8
+        total_expired:
+          type: integer
+          format: int64
+          description: Total de mensagens descartadas por TTL expirado
+          example: 0
+        dlq_size:
+          type: integer
+          format: int64
+          description: Mensagens na DLQ (0 se DLQ desabilitada)
+          example: 3
+        consumer_count:
+          type: integer
+          format: int32
+          description: Número de consumidores ativos conectados
+          example: 2
+
+    ListQueuesResponse:
+      type: object
+      properties:
+        queues:
+          type: array
+          items:
+            $ref: "#/components/schemas/QueueDetails"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+
+    Pagination:
+      type: object
+      properties:
+        page:
+          type: integer
+          example: 1
+        page_size:
+          type: integer
+          example: 20
+        total_items:
+          type: integer
+          example: 5
+        total_pages:
+          type: integer
+          example: 1
+
+    ErrorResponse:
+      type: object
+      required:
+        - code
+        - message
+      properties:
+        code:
+          type: string
+          description: Código de erro legível por máquina
+          enum:
+            - QUEUE_ALREADY_EXISTS
+            - QUEUE_NOT_FOUND
+            - INVALID_QUEUE_NAME
+            - INVALID_CONFIG
+            - INTERNAL_ERROR
+          example: "QUEUE_ALREADY_EXISTS"
+        message:
+          type: string
+          description: Descrição legível por humanos do erro
+          example: "A queue with name 'orders.created' already exists"
+        details:
+          type: object
+          additionalProperties: true
+          nullable: true
+          description: Detalhes adicionais do erro (campos inválidos, etc.)

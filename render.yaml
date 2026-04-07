@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: gomq
+    env: docker
+    region: oregon
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: GOMQ_HTTP_PORT
+        value: 8080
